@@ -1,6 +1,24 @@
 library(dplyr)
 library(DBI)
 library(keyring)
+library(ggplot2)
+
+old_rpw <- read.csv("data/2020/rpw_2020.csv") |> 
+  filter(!area == "GOA")
+
+ggplot(old_rpw, aes(year, rpw)) +
+  geom_point() + facet_wrap(~area) + theme_bw()
+
+old_biom <- read.csv("data/2020/biomass_2020.csv")
+
+ggplot(old_biom, aes(year, biomass)) +
+  geom_point() + facet_wrap(~area) + theme_bw()
+
+
+try <- old_biom |> filter(area == "EBS", year > 2009) |> 
+  mutate(biomass = as.numeric(biomass))
+
+summary(try)
 
 # I get survey data from AKFIN and my credentials are stored with keyring
 db <- "akfin"
@@ -14,8 +32,7 @@ rpw <- dbGetQuery(channel_akfin,
                   "select    *
                 from      afsc.lls_area_rpn_all_strata
                 where     species_code = '21230' and
-                          fmp_management_area = 'GOA' and
-                          exploitable = 1 and
+                          fmp_management_area = 'BSAI' and
                           country = 'United States'
                 order by  year asc
                 ") %>%
@@ -24,35 +41,34 @@ rpw <- dbGetQuery(channel_akfin,
 cpue <- rpw %>%
   filter(year > 1991, year < YEAR + 1) %>%
   group_by(year, strata = council_management_area) %>%
-  mutate(strata = ifelse(strata == 'Western Gulf of Alaska', 'WGOA',
-                         ifelse(strata == 'Central Gulf of Alaska', 'CGOA',
-                                ifelse(strata == 'Eastern Gulf of Alaska', 'EGOA', NA)))) %>%
+  mutate(strata = ifelse(strata == 'Aleutians', 'AI',
+                         ifelse(strata == 'Bering Sea', 'EBS', NA))) %>%
   summarize(cpue = sum(rpw, na.rm = TRUE),
             cv = sqrt(sum(rpw_var, na.rm = TRUE)) / cpue)
 
-cpue_dat <- left_join(data.frame('year' = rep(unique(cpue$year), each = 3), 'strata' = rep(c('WGOA', 'CGOA', 'EGOA'), length(unique(cpue$year)))), cpue, by = c('year', 'strata'))
+cpue_dat <- left_join(data.frame('year' = rep(unique(cpue$year), each = 2), 'strata' = rep(c('AI', 'EBS'), length(unique(cpue$year)))), cpue, by = c('year', 'strata'))
 
 # Get bottom trawl survey biomass data
 # Use the old data pull for comparison to the old model b/c GAP Products already removed 84/87 but old model included them
-biom <- dbGetQuery(channel_akfin, 
+ai_biom <- dbGetQuery(channel_akfin, 
                    "select    *
                 from      afsc.race_biomassstratumaigoa
                 where     species_code = '21230' and 
-                          survey = 'GOA' and 
+                          survey = 'AI' and 
                           year > 1983
                 order by  year asc
                 ") %>% 
   rename_all(tolower) %>% 
   filter(year < (YEAR + 1))
 
-strata <- dbGetQuery(channel_akfin, 
+ai_strata <- dbGetQuery(channel_akfin, 
                      "select    *
                 from      afsc.race_goastrataaigoa
-                where     survey = 'GOA'
+                where     survey = 'AI'
                 ") %>% 
   rename_all(tolower)
 
-biom_old <- left_join(biom, strata, by = c("stratum"))  
+ai_biom_old <- left_join(ai_biom, ai_strata, by = c("stratum"))  
 
 # Using all data like previous model
 biomass_5_old <- biom_old %>% 
@@ -71,11 +87,14 @@ biomass_dat_5_old <- left_join(data.frame('year' = rep(unique(biomass_5_old$year
                            biomass_5_old, by = c('year', 'strata')) %>% 
   mutate(cv = ifelse(biomass == 0, 0.1, cv))
 
+ebs = 98
+ai = 52
+
 biom <- dbGetQuery(channel_akfin, 
                    "select    *
                 from      gap_products.akfin_biomass
                 where     species_code = '21230' and 
-                          survey_definition_id = 47
+                          survey_definition_id = 52 
                 order by  year asc
                 ") %>% 
   rename_all(tolower) %>% 

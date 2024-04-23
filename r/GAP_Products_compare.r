@@ -15,7 +15,7 @@ biom <- dbGetQuery(channel_akfin,
                    "select    *
                 from      afsc.race_biomassstratumaigoa
                 where     species_code = '21230' and 
-                          survey = 'GOA' and 
+                          survey = 'AI' and 
                           year > 1983
                 order by  year asc
                 ") %>% 
@@ -25,7 +25,7 @@ biom <- dbGetQuery(channel_akfin,
 strata <- dbGetQuery(channel_akfin, 
                      "select    *
                 from      afsc.race_goastrataaigoa
-                where     survey = 'GOA'
+                where     survey = 'AI'
                 ") %>% 
   rename_all(tolower)
 
@@ -43,11 +43,11 @@ biomass <- biom2 %>%
 
 # Same but with GAP products instead of race_
 # Get bottom trawl survey biomass data
-biom <- dbGetQuery(channel_akfin, 
+biom_new <- dbGetQuery(channel_akfin, 
                    "select    *
                 from      gap_products.akfin_biomass
                 where     species_code = '21230' and 
-                          survey_definition_id = 47
+                          survey_definition_id = 52
                 order by  year asc
                 ") %>% 
   rename_all(tolower) %>% 
