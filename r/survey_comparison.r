@@ -1,132 +1,109 @@
 library(dplyr)
+library(tidyr)
+library(ggplot2)
 library(lubridate)
 library(DBI)
 library(keyring)
+library(cowplot)
 
 # I get survey data from AKFIN and my credentials are stored with keyring
 db <- "akfin"
 channel_akfin <- DBI::dbConnect (odbc::odbc(),
                                  dsn = db,
-                                 uid = keyring::key_list(db)$username,
-                                 pwd =  keyring::key_get(db, keyring::key_list(db)$username))
+                                 uid = keyring::key_list(db)$username[1],
+                                 pwd =  keyring::key_get(db, keyring::key_list(db)$username[1]))
 
 # Looking at catch in BTS across region by depth...how well is each survey sampling shortraker???
 catch <- dbGetQuery(channel_akfin, 
                     "select    *
-                from      afsc.race_catchaigoa
-                where     species_code = '21230' and 
-                          region = 'GOA' 
-
-                ") %>% 
+                    from      gap_products.akfin_catch
+                    where     species_code = '21230'
+                ") |> 
   rename_all(tolower)
 
 haul <- dbGetQuery(channel_akfin, 
-                   "select    *
-                from      afsc.race_haulaigoa
-                where     region = 'GOA' 
-                ") %>% 
-  rename_all(tolower) %>% 
-  filter(abundance_haul == "Y", year(start_time) > 1989, year(start_time) < YEAR + 1, haul_type == 3) %>% 
-  mutate(strata = ifelse(stratum %in% c(10:13, 110:112, 210, 310, 410, 510), 'WGOA',
-                         ifelse(stratum %in% c(20:35, 120:134, 220:232, 32, 320, 330, 420, 430, 520, 530), 'CGOA',
-                                ifelse(stratum %in% c(40:50, 140:151, 240:251, 340:351, 440, 450, 540, 550), 'EGOA', NA))))
+                   "select  CRUISEJOIN, DEPTH_GEAR_M, HAULJOIN, LATITUDE_DD_START, PERFORMANCE,
+                            LONGITUDE_DD_END, DISTANCE_FISHED_KM, NET_HEIGHT_M, NET_WIDTH_M
+                    from    gap_products.akfin_haul
+                    where performance = 0
+                ") |>  
+  rename_all(tolower) 
 
-cat_dat <- left_join(haul, catch, by = c("hauljoin")) %>% 
-  mutate(number_fish = ifelse(is.na(number_fish), 0, number_fish),
-    strata = ifelse(stratum %in% c(10:13, 110:112, 210, 310, 410, 510), 'WGOA',
-                         ifelse(stratum %in% c(20:35, 120:134, 220:232, 32, 320, 330, 420, 430, 520, 530), 'CGOA',
-                                ifelse(stratum %in% c(40:50, 140:151, 240:251, 340:351, 440, 450, 540, 550), 'EGOA', NA))))
+cruise <- dbGetQuery(channel_akfin, 
+                     "select    CRUISEJOIN, YEAR, SURVEY_DEFINITION_ID
+                      from      gap_products.akfin_cruise
+                      where     survey_definition_id = 52
+                      ") |>  
+  rename_all(tolower) 
 
-ggplot(cat_dat) + 
-  geom_density(aes(bottom_depth), fill = "grey60", alpha = 0.8) + 
-  geom_density(aes(bottom_depth, weight = number_fish), fill = "red", alpha = 0.8) + 
-  facet_grid(year(start_time)~factor(strata, levels=c('WGOA', 'CGOA', 'EGOA'))) +
-  theme_bw() +
-  ylab("Density") +
-  xlab("Depth (m)")
+haul_dat <- left_join(haul, cruise) |> 
+  mutate(region = ifelse(survey_definition_id == 52, "AI", NA)) |>
+  filter(!is.na(region))
 
-# All years combined
-ggplot(haul) + 
-  geom_density(aes(bottom_depth), fill = "grey60", alpha = 0.8) + 
-  geom_density(data = cat_dat, aes(bottom_depth, weight = number_fish), fill = "red", alpha = 0.8) + 
-  facet_grid(~factor(strata, levels=c('WGOA', 'CGOA', 'EGOA'))) +
-  theme_bw() +
-  ylab("Density") +
-  xlab("Depth (m)") +
-  scale_x_continuous(expand=c(0,0), limits = c(0, 1200), breaks=seq(0, 1200, 250))
+# Function to scale cpue from 0 to 1 to compare across surveys
+range01 <- function(x){(x-min(x))/(max(x)-min(x))}
 
-ggsave(file = paste0("results/", YEAR, "/BTS_depth_effort.png"), height = 2.5, width = 6, dpi=600)
-
+bt_dat <- left_join(haul_dat, catch, by = c("hauljoin")) %>% 
+  mutate(catch_freq = ifelse(is.na(count), 0, count),
+         effort = distance_fished_km) |> 
+  filter(!is.na(depth_gear_m), depth_gear_m > 0) |> 
+  mutate(dep = ifelse(depth_gear_m > 1000, 1001, depth_gear_m)) |> 
+  group_by(depth = cut(dep, breaks = seq(0, 1050, 50), labels = c(seq(50, 1000, 50), ">1000"))) |> 
+  summarize(N_hauls = n(), eff = sum(effort), freq = sum(catch_freq)) |> 
+  filter(N_hauls > 10)  |> 
+  mutate(survey = "BTS", cpue = range01(freq / eff))
+         
 # Looking at catch in LLS across region by depth 
 ll_dep <- dbGetQuery(channel_akfin, 
                      "select    *
                 from      afsc.lls_depth_summary_view
                 where     exploitable = 1 and 
                           year > 1991 and
+                          council_sablefish_management_area = 'Aleutians' and 
                           country = 'United States'
                 order by  year asc
-                ") %>% 
-  rename_all(tolower) %>% 
-  filter(year < YEAR + 1, !council_sablefish_management_area == "Aleutians", !council_sablefish_management_area == "Bering Sea") %>% 
-  mutate(region = ifelse(council_sablefish_management_area == "Central Gulf of Alaska", "CGOA",
-                         ifelse(council_sablefish_management_area == "Western Gulf of Alaska", "WGOA",
-                                "EGOA")))
-
+                ") |> 
+  rename_all(tolower) |> 
+  mutate(region = ifelse(council_sablefish_management_area == "Aleutians", "AI",
+                         ifelse(council_sablefish_management_area == "Bering Sea", "EBS",
+                                ifelse(council_sablefish_management_area %in% c("Central Gulf of Alaska", "Western Gulf of Alaska", "Eastern Gulf of Alaska"),
+                                       "GOA", NA))))
+                                                                                
 ll_catch <- dbGetQuery(channel_akfin, 
                        "select    *
                 from      afsc.lls_catch_summary_view
                 where     species_code = '21230' and 
                           year > 1991 and
-                          year < 2022 and
-                          exploitable = 1 and 
+                          exploitable = 1 and
+                          council_sablefish_management_area = 'Aleutians' and 
                           country = 'United States'
                 order by  year asc
-                ") %>% 
-  rename_all(tolower) %>% 
-  filter(!council_sablefish_management_area == "Aleutians", !council_sablefish_management_area == "Bering Sea") %>% 
+                ") |> 
+  rename_all(tolower) |> 
   select("cruise_number", "station_number", "hachi", "catch_freq")
+
+DBI::dbDisconnect(channel_akfin)
 
 ll_dat <- left_join(ll_dep, ll_catch, by = c("cruise_number", "station_number", "hachi")) %>%
   filter(rpw_flag == 1, ineffective < 6) %>% 
-  mutate(catch_freq = ifelse(is.na(catch_freq), 0, catch_freq))
+  mutate(catch_freq = ifelse(is.na(catch_freq), 0, catch_freq)) |> 
+  filter(intrpdep > 0) |> 
+  mutate(dep = ifelse(intrpdep > 1000, 1001, intrpdep)) |> 
+  group_by(depth = cut(dep, breaks = seq(0, 1050, 50), labels = c(seq(50, 1000, 50), ">1000"))) |> 
+  summarize(eff = n(), freq = sum(catch_freq)) |> 
+  mutate(survey = "LLS", cpue = range01(freq / eff))
+
+cpue_dat <- bind_rows(bt_dat, ll_dat)
   
-ggplot(ll_dat) + 
-  geom_density(aes(intrpdep), fill = "grey60", alpha = 0.8) + 
-  geom_density(aes(intrpdep, weight = catch_freq), fill = "red", alpha = 0.8) + 
-  facet_grid(year~factor(region, levels=c('WGOA', 'CGOA', 'EGOA'))) +
+ggplot(cpue_dat, aes(depth, cpue, col = survey)) + 
+  geom_point(position = position_dodge(0.6)) + 
   theme_bw() +
-  ylab("Density") +
-  xlab("Depth (m)")
+  xlab("Depth bin") +
+  ylab("Scaled No. per unit effort") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
 
-# All years combined
-ggplot(ll_dat) + 
-  geom_density(aes(intrpdep), fill = "grey60", alpha = 0.8) + 
-  geom_density(aes(intrpdep, weight = catch_freq), fill = "red", alpha = 0.8) + 
-  facet_grid(~factor(region, levels=c('WGOA', 'CGOA', 'EGOA'))) +
-  theme_bw() +
-  ylab("Density") +
-  xlab("Depth (m)") +
-  scale_x_continuous(expand=c(0,0), limits = c(0, 1200), breaks=seq(0, 1200, 250))
+ggsave(file = paste0("results/ai_", YEAR, "/surveys_by_depth_bin.png"), height = 5, width = 6, dpi=600)
 
-ggsave(file = paste0("results/", YEAR, "/LLS_depth_effort.png"), height = 2.5, width = 6, dpi=600)
-
-cowplot::plot_grid(ggplot(haul) + 
-                     geom_density(aes(bottom_depth), fill = "grey60", alpha = 0.8) + 
-                     geom_density(data = cat_dat, aes(bottom_depth, weight = number_fish), fill = "red", alpha = 0.8) + 
-                     facet_grid(~factor(strata, levels=c('WGOA', 'CGOA', 'EGOA'))) +
-                     theme_bw() +
-                     labs(y = "Density (BTS)", x = "Depth (m)") +
-                     scale_x_continuous(expand=c(0,0), limits = c(0, 1200), breaks=seq(0, 1200, 250)),
-                   ggplot(ll_dat) + 
-                     geom_density(aes(intrpdep), fill = "grey60", alpha = 0.8) + 
-                     geom_density(aes(intrpdep, weight = catch_freq), fill = "blue", alpha = 0.8) + 
-                     facet_grid(~factor(region, levels=c('WGOA', 'CGOA', 'EGOA'))) +
-                     theme_bw() +
-                     labs(y = "Density (LLS)", x = "Depth (m)", fill = "ddd") +
-                     scale_x_continuous(expand=c(0,0), limits = c(0, 1200), breaks=seq(0, 1200, 250)),
-                   ncol = 1)
-
-ggsave(file = paste0("results/", YEAR, "/combo_depth_effort.png"), height = 5, width = 6, dpi=600)
 # Now look at the lengths by survey...
 lls.gren.len2 <- lls.gren.len %>% 
   filter(!length == 999) %>% 
